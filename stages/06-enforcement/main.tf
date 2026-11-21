@@ -64,8 +64,10 @@ resource "azurerm_policy_definition" "fix_public_blob" {
       effect = local.effect == "Audit" ? "Audit" : "Modify"
       details = local.effect == "Audit" ? null : {
         roleDefinitionIds = [
-          # Storage Account Contributor — the narrowest built-in that can write this property
-          "/providers/Microsoft.Authorization/roleDefinitions/17d1049b-9a84-46fb-8f53-869881c3d3ab"
+          # Custom least-privilege role (below) — replaces the starter's Storage Account
+          # Contributor, which also grants listKeys/regenerateKey: a path to blob DATA on
+          # any account that still accepts shared keys (e.g. Terraform state).
+          "/providers/Microsoft.Authorization/roleDefinitions/${azurerm_role_definition.remediation_storage_config.role_definition_id}"
         ]
         conflictEffect = "audit"
         operations = [
@@ -90,12 +92,37 @@ resource "azurerm_management_group_policy_assignment" "fix_public_blob" {
   }
 }
 
+# --- Capstone change: a whitelist role that is exactly the job ---
+# The Modify effect PATCHes one property on the storage account resource. That needs
+# storageAccounts/read + storageAccounts/write and nothing else. Deliberately absent:
+#   listKeys/action, regenerateKey/action  -> no route to blob data via account keys
+#   storageAccounts/delete                 -> cannot destroy what it fixes
+#   blobServices/containers/*              -> cannot touch containers or immutability
+# blast radius: can change configuration properties of storage accounts under
+# mg-grc-sandbox (the policy rule limits WHICH property it changes). Cannot read data,
+# list keys, or delete. rollback: remove the role assignment; remediation fails closed.
+resource "azurerm_role_definition" "remediation_storage_config" {
+  name        = "GRC Remediation - Storage Configuration Writer"
+  scope       = local.mg_id
+  description = "Least-privilege role for id-grc-remediation: read/write storage account configuration only. No key listing, no delete, no data plane."
+
+  permissions {
+    actions = [
+      "Microsoft.Storage/storageAccounts/read",
+      "Microsoft.Storage/storageAccounts/write",
+    ]
+    not_actions = []
+  }
+
+  assignable_scopes = [local.mg_id]
+}
+
 # The remediation identity earns the storage role only when remediation can actually run.
 resource "azurerm_role_assignment" "remediation_storage" {
-  count                = var.remediation_mode == "audit" ? 0 : 1
-  scope                = local.mg_id
-  role_definition_name = "Storage Account Contributor"
-  principal_id         = local.remediation_pid
+  count              = var.remediation_mode == "audit" ? 0 : 1
+  scope              = local.mg_id
+  role_definition_id = azurerm_role_definition.remediation_storage_config.role_definition_resource_id
+  principal_id       = local.remediation_pid
 }
 
 output "remediation_mode" {

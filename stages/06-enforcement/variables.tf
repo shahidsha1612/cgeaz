@@ -21,3 +21,8 @@ variable "state_resource_group" {
 variable "state_storage_account" {
   type = string
 }
+
+variable "owner_email" {
+  description = "Where the portal-change tripwire alert is sent. CI supplies it from the OWNER_EMAIL repo variable; never commit a real address."
+  type        = string
+}
