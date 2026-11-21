@@ -42,9 +42,13 @@ def _collect() -> dict:
         .get_container_client("assessments")
     )
 
+    # $expand=metadata is required: without it the list API omits properties.metadata,
+    # so severity and categories come back null and every POA&M item silently falls
+    # back to the Medium (90-day) SLA. Found by tracing a SAR number in Lab 5.
     url = (
         f"{ARM}/subscriptions/{subscription_id}"
         f"/providers/Microsoft.Security/assessments?api-version={API_VERSION}"
+        f"&$expand=metadata"
     )
     written = 0
     while url:

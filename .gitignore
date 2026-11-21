@@ -19,3 +19,4 @@ __pycache__/
 *.zip
 .DS_Store
 lab1-evidence.json
+lab3-deny-evidence.txt
