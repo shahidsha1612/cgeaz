@@ -42,7 +42,7 @@ and it's a first-class criterion on the capstone rubric.
 |---|---|---|
 | `cge-fix-public-blob` (Modify, mode ladder) | Auto-remediation through the dedicated identity; human-approved in dry-run | PR.DS, RS.MI |
 | `remediation_mode` variable | Escalation is a reviewed diff — automation acts, humans authorize | GV.PO, GV.RR |
-| **`GRC Remediation - Storage Configuration Writer` custom role** *(capstone addition)* | Replaces Storage Account Contributor for the remediation identity: `storageAccounts/read` + `/write` only. No `listKeys` (no path to data), no delete. | PR.AA |
+| **`GRC Remediation - Storage Configuration Writer` custom role** *(capstone addition)* | Replaces Storage Account Contributor for the remediation identity: `storageAccounts/read` + `/write` only. No `listKeys` (no path to data), no delete. Verified 2026-11-21: sabotage → scan → approved remediation task Succeeded (1 fixed, 0 failed) under this role. | PR.AA |
 | **KQL tripwire `grc-tripwire-portal-writes`** (scheduled query alert + action group) *(capstone addition)* | Hourly: any successful admin write made by a human through the Azure portal emails the owner. Drift's second direction — who is touching reality. | DE.CM, DE.AE |
 
 ## Repo gates (policy/)
