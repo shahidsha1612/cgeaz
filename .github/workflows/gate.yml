@@ -37,6 +37,13 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
+      - name: write backend config from repo variables
+        # labs/03-foundation/backend.hcl is gitignored (machine-generated per learner),
+        # so a CI checkout never has it; rebuild it from the STATE_STORAGE_ACCOUNT variable.
+        run: |
+          printf 'resource_group_name  = "rg-grc-tfstate"\nstorage_account_name = "%s"\ncontainer_name       = "tfstate"\n' \
+            "${{ vars.STATE_STORAGE_ACCOUNT }}" > labs/03-foundation/backend.hcl
+
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
