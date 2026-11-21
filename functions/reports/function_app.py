@@ -28,17 +28,33 @@ app = func.FunctionApp()
 SLA_DAYS = {"High": 30, "Medium": 90, "Low": 180}
 
 
+CSF_FRAMEWORK = "nist-csf-2.0"
+
+
 def _clients():
     credential = DefaultAzureCredential()
-    cosmos = (
-        CosmosClient(os.environ["COSMOS_ENDPOINT"], credential)
-        .get_database_client(os.environ["COSMOS_DATABASE"])
-        .get_container_client("assessments")
+    database = CosmosClient(os.environ["COSMOS_ENDPOINT"], credential).get_database_client(
+        os.environ["COSMOS_DATABASE"]
     )
+    cosmos = database.get_container_client("assessments")
     blobs = BlobServiceClient(
         account_url=os.environ["REPORTS_ACCOUNT_URL"], credential=credential
     ).get_container_client(os.environ["REPORTS_CONTAINER"])
-    return cosmos, blobs
+    return cosmos, blobs, database.get_container_client("mappings")
+
+
+def _csf_lookup(mappings) -> dict:
+    """The crosswalk, read from the store like everything else: assessmentId -> CSF 2.0 categories."""
+    rows = mappings.query_items(
+        "SELECT c.assessmentId, c.categories FROM c WHERE c.frameworkId = @fw",
+        parameters=[{"name": "@fw", "value": CSF_FRAMEWORK}],
+        partition_key=CSF_FRAMEWORK,
+    )
+    return {r["assessmentId"]: r["categories"] for r in rows}
+
+
+def _csf_for(lookup: dict, finding: dict) -> list:
+    return lookup.get(finding.get("assessmentId"), ["UNMAPPED"])
 
 
 def _latest_run(cosmos):
@@ -68,9 +84,10 @@ def _dated_path(prefix: str, ext: str) -> str:
 
 
 def generate_poam() -> dict:
-    cosmos, blobs = _clients()
+    cosmos, blobs, mappings = _clients()
     run_id, collected_at = _latest_run(cosmos)
     findings = _unhealthy(cosmos, run_id) if run_id else []
+    csf = _csf_lookup(mappings)
     today = datetime.date.today()
 
     wb = Workbook()
@@ -78,7 +95,7 @@ def generate_poam() -> dict:
     ws.title = "POA&M"
     ws.append(
         ["POA&M ID", "Weakness", "Affected Resource", "Severity",
-         "Detected (run)", "Scheduled Completion", "Owner", "Status"]
+         "Detected (run)", "Scheduled Completion", "Owner", "Status", "NIST CSF 2.0"]
     )
     rows = []
     for i, f in enumerate(sorted(findings, key=lambda x: x.get("severity") or ""), 1):
@@ -93,6 +110,7 @@ def generate_poam() -> dict:
             "scheduledCompletion": due.isoformat(),
             "owner": "resource-group owner tag",  # resolved during Domain 5's lab extension
             "status": "Open",
+            "csf2": ", ".join(_csf_for(csf, f)),
         }
         rows.append(row)
         ws.append(list(row.values()))
@@ -112,10 +130,15 @@ def generate_poam() -> dict:
 
 
 def generate_sar() -> dict:
-    cosmos, blobs = _clients()
+    cosmos, blobs, mappings = _clients()
     run_id, collected_at = _latest_run(cosmos)
     findings = _unhealthy(cosmos, run_id) if run_id else []
     by_severity = Counter(f.get("severity") or "Unknown" for f in findings)
+    csf = _csf_lookup(mappings)
+    # A finding touching two categories in one CSF function counts once for that function.
+    by_function = Counter(
+        fn for f in findings for fn in sorted({c.split(".")[0] for c in _csf_for(csf, f)})
+    )
 
     lines = [
         "# Security Assessment Report (SAR)",
@@ -124,6 +147,8 @@ def generate_sar() -> dict:
         f"- **Collected at:** {collected_at}",
         f"- **Open findings:** {len(findings)}",
         f"- **By severity:** " + (", ".join(f"{k}: {v}" for k, v in sorted(by_severity.items())) or "none"),
+        f"- **By NIST CSF 2.0 function:** " + (", ".join(f"{k}: {v}" for k, v in sorted(by_function.items())) or "none"),
+        "  (crosswalk: Cosmos `mappings` container, sourced from mappings/csf2-defender-crosswalk.json)",
         "",
         "## Findings",
         "",
@@ -132,6 +157,7 @@ def generate_sar() -> dict:
         lines += [
             f"### {f.get('displayName')}",
             f"- Severity: {f.get('severity')}",
+            f"- NIST CSF 2.0: {', '.join(_csf_for(csf, f))}",
             f"- Resource: `{f.get('resourceId')}`",
             f"- Assessment ID: `{f.get('assessmentId')}` (trace: query the assessments container)",
             "",
