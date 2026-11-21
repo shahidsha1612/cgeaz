@@ -54,13 +54,27 @@ jobs:
       - name: terraform validate + plan
         working-directory: stages/${{ matrix.stage }}
         run: |
-          terraform init -input=false -backend-config=../../labs/03-foundation/backend.hcl
-          terraform validate
-          terraform plan -input=false -out=tf.plan
+          set -o pipefail
+          terraform init -input=false -no-color -backend-config=../../labs/03-foundation/backend.hcl 2>&1 | tee init.log
+          terraform validate -no-color
+          if ! terraform plan -input=false -no-color -out=tf.plan > plan.log 2>&1; then
+            cat plan.log
+            # Surface the error as an annotation so the verdict is readable on the PR itself.
+            msg=$(grep -A4 '^Error' plan.log | head -20 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=terraform plan failed (${{ matrix.stage }})::${msg}"
+            exit 1
+          fi
+          tail -3 plan.log
           terraform show -json tf.plan > plan.json
 
+      # Pinned, current conftest. The previous instrumenta/conftest-action@master
+      # shipped an OPA too old to parse `import rego.v1`, so every stage "failed"
+      # on a parse error rather than on a policy verdict.
+      - name: install conftest
+        run: |
+          curl -sSL https://github.com/open-policy-agent/conftest/releases/download/v0.71.1/conftest_0.71.1_Linux_x86_64.tar.gz \
+            | tar -xz -C /usr/local/bin conftest
+          conftest --version
+
       - name: OPA gate (conftest)
-        uses: instrumenta/conftest-action@master
-        with:
-          files: stages/${{ matrix.stage }}/plan.json
-          policy: policy
+        run: conftest test stages/${{ matrix.stage }}/plan.json -p policy --output github
