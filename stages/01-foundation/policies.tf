@@ -129,6 +129,146 @@ resource "azurerm_policy_definition" "storage_diagnostics" {
   })
 }
 
+# --- 4. (capstone addition) Management ports must not be open to the internet ---
+# SSH (22) and RDP (3389) reachable from anywhere is the most common initial-access
+# path in cloud incidents. Evaluated at two levels because Azure exposes rules both
+# ways: inline in the NSG's securityRules array (what compliance scans see) and as
+# child securityRules resources (what a request-time `az network nsg rule create` sends).
+# Effect starts at Audit: a new control observes before it blocks. Escalate to Deny
+# once the estate is clean (tfvar `nsg_mgmt_ports_effect`, a reviewed diff).
+
+locals {
+  internet_sources = ["*", "Internet", "0.0.0.0/0", "::/0", "any"]
+  mgmt_ports       = ["22", "3389", "*"]
+}
+
+resource "azurerm_policy_definition" "audit_nsg_mgmt_ports" {
+  name                = "cge-nsg-no-mgmt-ports-from-internet"
+  display_name        = "NSGs must not allow SSH/RDP inbound from the internet"
+  policy_type         = "Custom"
+  mode                = "All" # securityRules child resources carry no tags/location
+  management_group_id = azurerm_management_group.sandbox.id
+
+  parameters = jsonencode({
+    effect = {
+      type          = "String"
+      allowedValues = ["Audit", "Deny", "Disabled"]
+      defaultValue  = "Audit"
+    }
+  })
+
+  policy_rule = jsonencode({
+    if = {
+      anyOf = [
+        {
+          # Child rule resource (request-time evaluation)
+          allOf = [
+            { field = "type", equals = "Microsoft.Network/networkSecurityGroups/securityRules" },
+            { field = "Microsoft.Network/networkSecurityGroups/securityRules/access", equals = "Allow" },
+            { field = "Microsoft.Network/networkSecurityGroups/securityRules/direction", equals = "Inbound" },
+            {
+              anyOf = [
+                { field = "Microsoft.Network/networkSecurityGroups/securityRules/sourceAddressPrefix", in = local.internet_sources },
+                {
+                  count = {
+                    field = "Microsoft.Network/networkSecurityGroups/securityRules/sourceAddressPrefixes[*]"
+                    where = { field = "Microsoft.Network/networkSecurityGroups/securityRules/sourceAddressPrefixes[*]", in = local.internet_sources }
+                  }
+                  greater = 0
+                }
+              ]
+            },
+            {
+              anyOf = [
+                { field = "Microsoft.Network/networkSecurityGroups/securityRules/destinationPortRange", in = local.mgmt_ports },
+                {
+                  count = {
+                    field = "Microsoft.Network/networkSecurityGroups/securityRules/destinationPortRanges[*]"
+                    where = { field = "Microsoft.Network/networkSecurityGroups/securityRules/destinationPortRanges[*]", in = local.mgmt_ports }
+                  }
+                  greater = 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          # NSG with inline rules (compliance-scan evaluation)
+          allOf = [
+            { field = "type", equals = "Microsoft.Network/networkSecurityGroups" },
+            {
+              count = {
+                field = "Microsoft.Network/networkSecurityGroups/securityRules[*]"
+                where = {
+                  allOf = [
+                    { field = "Microsoft.Network/networkSecurityGroups/securityRules[*].access", equals = "Allow" },
+                    { field = "Microsoft.Network/networkSecurityGroups/securityRules[*].direction", equals = "Inbound" },
+                    {
+                      anyOf = [
+                        { field = "Microsoft.Network/networkSecurityGroups/securityRules[*].sourceAddressPrefix", in = local.internet_sources },
+                        {
+                          count = {
+                            field = "Microsoft.Network/networkSecurityGroups/securityRules[*].sourceAddressPrefixes[*]"
+                            where = { field = "Microsoft.Network/networkSecurityGroups/securityRules[*].sourceAddressPrefixes[*]", in = local.internet_sources }
+                          }
+                          greater = 0
+                        }
+                      ]
+                    },
+                    {
+                      anyOf = [
+                        { field = "Microsoft.Network/networkSecurityGroups/securityRules[*].destinationPortRange", in = local.mgmt_ports },
+                        {
+                          count = {
+                            field = "Microsoft.Network/networkSecurityGroups/securityRules[*].destinationPortRanges[*]"
+                            where = { field = "Microsoft.Network/networkSecurityGroups/securityRules[*].destinationPortRanges[*]", in = local.mgmt_ports }
+                          }
+                          greater = 0
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+              greater = 0
+            }
+          ]
+        }
+      ]
+    }
+    then = { effect = "[parameters('effect')]" }
+  })
+}
+
+# --- 5. (capstone addition) Storage accounts must refuse plaintext HTTP ---
+# Secure transfer required = HTTPS only. Data in transit, PR.DS. Audit first.
+
+resource "azurerm_policy_definition" "audit_storage_https" {
+  name                = "cge-storage-https-only"
+  display_name        = "Storage accounts must require secure transfer (HTTPS only)"
+  policy_type         = "Custom"
+  mode                = "Indexed"
+  management_group_id = azurerm_management_group.sandbox.id
+
+  parameters = jsonencode({
+    effect = {
+      type          = "String"
+      allowedValues = ["Audit", "Deny", "Disabled"]
+      defaultValue  = "Audit"
+    }
+  })
+
+  policy_rule = jsonencode({
+    if = {
+      allOf = [
+        { field = "type", equals = "Microsoft.Storage/storageAccounts" },
+        { field = "Microsoft.Storage/storageAccounts/supportsHttpsTrafficOnly", equals = "false" }
+      ]
+    }
+    then = { effect = "[parameters('effect')]" }
+  })
+}
+
 # --- The initiative: one assignment, whole-sandbox inheritance ---
 
 resource "azurerm_management_group_policy_set_definition" "grc_baseline" {
@@ -138,9 +278,11 @@ resource "azurerm_management_group_policy_set_definition" "grc_baseline" {
   management_group_id = azurerm_management_group.sandbox.id
 
   parameters = jsonencode({
-    tagEffect        = { type = "String", defaultValue = "Audit" }
-    publicBlobEffect = { type = "String", defaultValue = "Deny" }
-    workspaceId      = { type = "String" }
+    tagEffect          = { type = "String", defaultValue = "Audit" }
+    publicBlobEffect   = { type = "String", defaultValue = "Deny" }
+    workspaceId        = { type = "String" }
+    nsgMgmtPortsEffect = { type = "String", defaultValue = "Audit" }
+    storageHttpsEffect = { type = "String", defaultValue = "Audit" }
   })
 
   policy_definition_reference {
@@ -163,6 +305,20 @@ resource "azurerm_management_group_policy_set_definition" "grc_baseline" {
       workspaceId = { value = "[parameters('workspaceId')]" }
     })
   }
+
+  policy_definition_reference {
+    policy_definition_id = azurerm_policy_definition.audit_nsg_mgmt_ports.id
+    parameter_values = jsonencode({
+      effect = { value = "[parameters('nsgMgmtPortsEffect')]" }
+    })
+  }
+
+  policy_definition_reference {
+    policy_definition_id = azurerm_policy_definition.audit_storage_https.id
+    parameter_values = jsonencode({
+      effect = { value = "[parameters('storageHttpsEffect')]" }
+    })
+  }
 }
 
 resource "azurerm_management_group_policy_assignment" "grc_baseline" {
@@ -173,9 +329,11 @@ resource "azurerm_management_group_policy_assignment" "grc_baseline" {
   location             = var.location
 
   parameters = jsonencode({
-    tagEffect        = { value = var.tag_policy_effect }
-    publicBlobEffect = { value = var.public_blob_policy_effect }
-    workspaceId      = { value = azurerm_log_analytics_workspace.grc.id }
+    tagEffect          = { value = var.tag_policy_effect }
+    publicBlobEffect   = { value = var.public_blob_policy_effect }
+    workspaceId        = { value = azurerm_log_analytics_workspace.grc.id }
+    nsgMgmtPortsEffect = { value = var.nsg_mgmt_ports_effect }
+    storageHttpsEffect = { value = var.storage_https_effect }
   })
 
   # Remediation effects (deployIfNotExists) execute AS this identity.

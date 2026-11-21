@@ -34,3 +34,25 @@ variable "public_blob_policy_effect" {
     error_message = "public_blob_policy_effect must be Audit, Deny, or Disabled."
   }
 }
+
+# --- Capstone additions: new controls start at Audit (observe before you block). ---
+
+variable "nsg_mgmt_ports_effect" {
+  description = "Effect for the no-SSH/RDP-from-internet NSG policy. Audit while the estate is cleaned up; Deny once findings reach zero."
+  type        = string
+  default     = "Audit"
+  validation {
+    condition     = contains(["Audit", "Deny", "Disabled"], var.nsg_mgmt_ports_effect)
+    error_message = "nsg_mgmt_ports_effect must be Audit, Deny, or Disabled."
+  }
+}
+
+variable "storage_https_effect" {
+  description = "Effect for the storage secure-transfer (HTTPS-only) policy."
+  type        = string
+  default     = "Audit"
+  validation {
+    condition     = contains(["Audit", "Deny", "Disabled"], var.storage_https_effect)
+    error_message = "storage_https_effect must be Audit, Deny, or Disabled."
+  }
+}
